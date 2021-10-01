@@ -1,4 +1,4 @@
-//#include <Arduino.h>
+#include <Arduino.h>
 #include <Wire.h>
 #include "tcpm_driver.h"
 #include "FUSB302.h"
@@ -6,8 +6,6 @@
 const int usb_pd_int_pin = 12;
 const int debug_led_pin = 13;
 const int vbus_pin = 4;
-
-#define DFP
 
 // USB-C Specific - TCPM start 1
 const struct tcpc_config_t tcpc_config[CONFIG_USB_PD_PORT_COUNT] = {
@@ -38,9 +36,7 @@ state st = STATE_DISCONNECTED;
 void vbus_off(void)
 {
   digitalWrite(vbus_pin, LOW);
-#ifdef DFP
   delay(800);
-#endif
   pinMode(vbus_pin, INPUT);
   Serial.print("VBUS OFF\n");
 }
@@ -83,35 +79,6 @@ void evt_dfpconnect(void)
   STATE(DFP_VBUS_ON);
 }
 
-void evt_connect(void)
-{
-  int cc1 = -1, cc2 = -1;
-  fusb302_tcpm_get_cc(0, &cc1, &cc2);
-  Serial.print("Connected: cc1=");
-  Serial.print(cc1);
-  Serial.print(" cc2=");
-  Serial.print(cc2);
-  Serial.print("\n");
-  if (cc1 < 2 && cc2 < 2)
-  {
-    Serial.print("Nope.\n");
-    return;
-  }
-  fusb302_pd_reset(0);
-  fusb302_tcpm_set_msg_header(0, 0, 0); // Sink
-  if (cc1 > cc2)
-  {
-    fusb302_tcpm_set_polarity(0, 0);
-    Serial.print("Polarity: CC1 (normal)\n");
-  }
-  else
-  {
-    fusb302_tcpm_set_polarity(0, 1);
-    Serial.print("Polarity: CC2 (flipped)\n");
-  }
-  fusb302_tcpm_set_rx_enable(0, 1);
-  STATE(CONNECTED);
-}
 
 void evt_disconnect(void)
 {
@@ -119,12 +86,8 @@ void evt_disconnect(void)
   Serial.print("Disconnected\n");
   fusb302_pd_reset(0);
   fusb302_tcpm_set_rx_enable(0, 0);
-#ifdef DFP
   fusb302_tcpm_select_rp_value(0, TYPEC_RP_USB);
   fusb302_tcpm_set_cc(0, TYPEC_CC_RP); // DFP mode
-#else
-  fusb302_tcpm_set_cc(0, TYPEC_CC_RD); // UFP mode
-#endif
   STATE(DISCONNECTED);
 }
 
@@ -143,11 +106,7 @@ void send_power_request(uint32_t cap)
 
 void send_sink_cap(void)
 {
-#ifdef DFP
   int hdr = PD_HEADER(PD_DATA_SINK_CAP, 1, 1, 0, 1, PD_REV20, 0);
-#else
-  int hdr = PD_HEADER(PD_DATA_SINK_CAP, 0, 0, 0, 1, PD_REV20, 0);
-#endif
   uint32_t cap =
       (1L << 26) | // USB communications capable
       (0L << 10) | // 0mA operating
@@ -155,9 +114,9 @@ void send_sink_cap(void)
 
   fusb302_tcpm_transmit(0, TCPC_TX_SOP, hdr, &cap);
   Serial.print(">SINK_CAP\n");
-#ifdef DFP
+
   STATE(READY);
-#endif
+
 }
 
 void send_source_cap(void)
@@ -369,11 +328,8 @@ void handle_irq()
     if (fusb302_tcpm_get_vbus_level(0))
     {
       Serial.print("ON)\n");
-#ifdef DFP
       send_source_cap();
-#else
-      evt_connect();
-#endif
+
     }
     else
     {
@@ -393,125 +349,28 @@ void handle_irq()
   }
 }
 
-void vdm_fun()
-{
-
-  //uint32_t vdm[] = { 0x5ac8010 }; // Get Action List
-  //uint32_t vdm[] = { 0x5ac8012, 0x0105, 0x8002<<16 }; // PMU Reset + DFU Hold
-  //uint32_t vdm[] = { 0x5ac8011, 0x0809  }; // Get Action List
-  //uint32_t vdm[] = { 0x5ac8012, 0x0105, 0x8000<<16 };
-
-  // VDM to mux debug UART over SBU1/2
-  uint32_t vdm[] = {0x5AC8012, 0x01840306};
-
-#ifdef DFP
-  int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 1, 1, 0, sizeof(vdm) / 4, PD_REV20, 0);
-  fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME_PRIME, hdr, vdm);
-#else
-  int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 0, 0, 0, sizeof(vdm) / 4, PD_REV20, 0);
-  fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME, hdr, vdm);
-#endif
-  Serial.print(">VDM SET ACTION serial -> SBU1/2\n");
-}
 
 int msg_p = 0;
 int std_flag = 0;
 uint32_t msg_buf[32];
 
-void serial_handler()
-{
-  while (Serial.available() > 0)
-  {
-    char c = Serial.read();
-    if (c == '\n')
-    {
-#ifdef DFP
-      int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 1, 1, 0, msg_p + 1, PD_REV20, 0);
-#else
-      int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 0, 0, 0, msg_p + 1, PD_REV20, 0);
-#endif
-      if (std_flag)
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP, hdr, msg_buf);
-      else
-#ifdef DFP
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME_PRIME, hdr, msg_buf);
-#else
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME, hdr, msg_buf);
-#endif
-      Serial.print(">VDM");
-      if (!std_flag)
-        Serial.print("(D)");
-      for (int i = 0; i <= msg_p; i++)
-      {
-        Serial.print(" ");
-        Serial.print(msg_buf[i], HEX);
-      }
-      Serial.print("\n");
-      msg_p = 0;
-      std_flag = 0;
-      msg_buf[msg_p] = 0;
-    }
-    else if (c == 's')
-    {
-      std_flag = 1;
-    }
-    else if (c == ',')
-    {
-      msg_buf[++msg_p] = 0;
-    }
-    else if (c >= '0' && c <= '9')
-    {
-      msg_buf[msg_p] <<= 4;
-      msg_buf[msg_p] |= c - '0';
-    }
-    else if (c >= 'a' && c <= 'f')
-    {
-      msg_buf[msg_p] <<= 4;
-      msg_buf[msg_p] |= c - 'a' + 10;
-    }
-    else if (c >= 'A' && c <= 'F')
-    {
-      msg_buf[msg_p] <<= 4;
-      msg_buf[msg_p] |= c - 'A' + 10;
-    }
-  }
-}
 
-void button_handler()
+void send_mac_reboot()
 {
-#ifdef DFP
   int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 1, 1, 0, 3 + 1, PD_REV20, 0);
-#else
-  int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 0, 0, 0, 3 + 1, PD_REV20, 0);
-#endif
   uint32_t msg_reboot[32] = {0x5AC8012, 0x0105, 0x80000000};
-  uint32_t msg_dfu[32] = {0x5AC8012, 0x0106, 0x80010000};
-
-  while(true)
-  {
-    if(digitalRead(2) == LOW)
-    {
-      Serial.print("Pressed first button\n");
-#ifdef DFP
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME_PRIME, hdr, msg_reboot);
-#else
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME, hdr, msg_reboot);
-#endif
-      return;
-    }
-    else if(digitalRead(3) == LOW)
-    {
-      Serial.print("Pressed second button\n");
-#ifdef DFP
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME_PRIME, hdr, msg_dfu);
-#else
-        fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME, hdr, msg_dfu);
-#endif
-      return;
-    }
-    delay(50);
-  }
+  fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME_PRIME, hdr, msg_reboot);
+  delay(50);
 }
+
+void send_mac_dfu()
+{
+  int hdr = PD_HEADER(PD_DATA_VENDOR_DEF, 1, 1, 0, 3 + 1, PD_REV20, 0);
+  uint32_t msg_dfu[32] = {0x5AC8012, 0x0106, 0x80010000};
+  fusb302_tcpm_transmit(0, TCPC_TX_SOP_DEBUG_PRIME_PRIME, hdr, msg_dfu);
+  delay(50);
+}
+
 
 int cc_debounce = 0;
 
@@ -521,7 +380,7 @@ void state_machine()
   {
   case STATE_DISCONNECTED:
   {
-#ifdef DFP
+
     int cc1 = -1, cc2 = -1;
     fusb302_tcpm_get_cc(0, &cc1, &cc2);
     Serial.print("Poll: cc1=");
@@ -532,7 +391,7 @@ void state_machine()
     delay(200);
     if (cc1 >= 2 || cc2 >= 2)
       evt_dfpconnect();
-#endif
+
     break;
   }
   case STATE_CONNECTED:
@@ -549,16 +408,14 @@ void state_machine()
   }
   case STATE_READY:
   {
-    vdm_fun();
-    //#ifndef DFP
     STATE(IDLE);
-    //#endif
     break;
   }
   case STATE_IDLE:
   {
-    //serial_handler();
-    button_handler();
+    //send_mac_reboot();
+    send_mac_dfu();
+    delay(4 * 1000);
     break;
   }
   default:
@@ -568,7 +425,7 @@ void state_machine()
     Serial.print("\n");
   }
   }
-#ifdef DFP
+
   if (st != STATE_DISCONNECTED)
   {
     int cc1 = -1, cc2 = -1;
@@ -591,7 +448,7 @@ void state_machine()
       cc_debounce = 0;
     }
   }
-#endif
+
 }
 
 void setup()
@@ -635,9 +492,6 @@ void setup()
   handle_irq();
 
   evt_disconnect();
-
-  pinMode(2, INPUT_PULLUP); // Nima button 1
-  pinMode(3, INPUT_PULLUP); // Nima button 2
 }
 
 void loop()

@@ -6,13 +6,11 @@
  */ 
 
 #include "tcpm_driver.h"
-
 #include <Wire.h>
 
 extern const struct tcpc_config_t tcpc_config[CONFIG_USB_PD_PORT_COUNT];
 
 extern "C" {
-  //#include <Wire.h>
 
   void WirebeginTransmission(int addr)
   {
